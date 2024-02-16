@@ -5,7 +5,6 @@
     using System.ComponentModel;
     using System.ComponentModel.DataAnnotations;
     using System.Drawing;
-    using System.Net;
     using ATAS.Indicators;
     using ATAS.Indicators.Drawing;
     using ATAS.Indicators.Technical.Properties;
@@ -19,22 +18,12 @@
     using MColors = System.Windows.Media.Colors;
     using Pen = System.Drawing.Pen;
     using String = String;
-    using System.Runtime.ConstrainedExecution;
-    using static ATAS.Indicators.Technical.BarTimer;
     using System.Globalization;
     using OFT.Rendering.Settings;
-    using System.Windows.Ink;
-    using static System.Runtime.InteropServices.JavaScript.JSType;
-    using System.Resources;
-    using System.Runtime.Intrinsics.X86;
-    using System.Security.Cryptography;
 
     [DisplayName("Nebula")]
     public class Nebula : Indicator
     {
-        private const String sVersion = "1.0";
-        private int iJunk = 0;
-
         #region PRIVATE FIELDS
 
         private struct bars
@@ -50,6 +39,15 @@
             LineAlignment = StringAlignment.Center
         };
 
+        private decimal prevADX;
+        private decimal pprevADX;
+        private decimal prevSTR;
+        private decimal prevsMDI;
+        private decimal prevsPDI;
+        private decimal prevVarMA;
+
+        private const String sVersion = "1.0";
+        private int iJunk = 0;
         private List<bars> lsBar = new List<bars>();
         private readonly PaintbarsDataSeries _paintBars = new("Paint bars");
 
@@ -63,6 +61,7 @@
         private int iOffset = 1;
         private int iFontSize = 10;
         private int iWaddaSensitivity = 150;
+        private int iMACDSensitivity = 120;
         private int CandleColoring = 0;
 
         #endregion
@@ -80,6 +79,8 @@
             DataSeries.Add(_negSeries);
             DataSeries.Add(_upCloud);
             DataSeries.Add(_dnCloud);
+            DataSeries.Add(_paintBars);
+            DataSeries.Add(_fanVMA);
 
             Add(_kama9);
             Add(_kama21);
@@ -93,6 +94,11 @@
 
         #region INDICATORS
 
+        private readonly EMA McGinleyDynamic = new EMA() { Period = 14 };
+        private readonly SMA sma = new SMA() { Period = 6 };
+        private readonly EMA _short = new() { Period = 3 };
+        private readonly EMA _long = new() { Period = 10 };
+        private readonly EMA _signal = new() { Period = 16 };
         private readonly RSI _rsi = new() { Period = 14 };
         private readonly ATR _atr = new() { Period = 14 };
         private readonly AwesomeOscillator _ao = new AwesomeOscillator();
@@ -103,7 +109,6 @@
         private readonly BollingerBands _bb = new BollingerBands() { Period = 20, Shift = 0, Width = 2 };
         private readonly KAMA _kama9 = new KAMA() { ShortPeriod = 2, LongPeriod = 109, EfficiencyRatioPeriod = 9 };
         private readonly KAMA _kama21 = new KAMA() { ShortPeriod = 2, LongPeriod = 109, EfficiencyRatioPeriod = 21 };
-        private readonly MACD _macd = new MACD() { ShortPeriod = 12, LongPeriod = 26, SignalPeriod = 9 };
         private readonly SqueezeMomentum _sq = new SqueezeMomentum() { BBPeriod = 20, BBMultFactor = 2, KCPeriod = 20, KCMultFactor = 1.5m, UseTrueRange = false };
 
         #endregion
@@ -164,6 +169,7 @@
         [Range(0, 900)]
         public int Offset { get => iOffset; set { iOffset = value; RecalculateValues(); } }
 
+        private ValueDataSeries _fanVMA = new("Fantail VMA") { VisualType = VisualMode.Line, Color = DefaultColors.Yellow.Convert(), Width = 3 };
         private readonly ValueDataSeries _posSeries = new("Regular Buy Signal") { Color = MColor.FromArgb(255, 0, 255, 0), VisualType = VisualMode.UpArrow, Width = 2 };
         private readonly ValueDataSeries _negSeries = new("Regular Sell Signal") { Color = MColor.FromArgb(255, 255, 0, 0), VisualType = VisualMode.DownArrow, Width = 2 };
         private RangeDataSeries _upCloud = new("Up Cloud") { RangeColor = MColor.FromArgb(73, 0, 255, 0), DrawAbovePrice = false };
@@ -180,8 +186,9 @@
                 {
                     new Entity { Value = 1, Name = "None" },
                     new Entity { Value = 2, Name = "Waddah Explosion" },
-                    new Entity { Value = 3, Name = "Squeeze" },
-                    new Entity { Value = 4, Name = "Delta" }
+                    new Entity { Value = 3, Name = "Linda MACD" },
+                    new Entity { Value = 4, Name = "Squeeze" },
+                    new Entity { Value = 5, Name = "Delta" }
                 })
             { }
         }
@@ -194,10 +201,10 @@
 
         [Display(GroupName = "Colored Candles", Name = "Waddah Sensitivity")]
         [Range(0, 9000)]
-        public int WaddaSensitivity
-        {
-            get => iWaddaSensitivity; set { if (value < 0) return; iWaddaSensitivity = value; RecalculateValues(); }
-        }
+        public int WaddaSensitivity { get => iWaddaSensitivity; set { if (value < 0) return; iWaddaSensitivity = value;RecalculateValues(); } }
+        [Display(GroupName = "Colored Candles", Name = "MACD Sensitivity")]
+        [Range(0, 9000)]
+        public int MACDSensitivity { get => iMACDSensitivity; set { if (value < 0) return; iMACDSensitivity = value; RecalculateValues(); } }
 
         [Display(ResourceType = typeof(Resources), GroupName = "Alerts", Name = "UseAlerts")]
         public bool UseAlerts { get; set; }
@@ -278,16 +285,12 @@
 
             fastEma.Calculate(pbar, value);
             slowEma.Calculate(pbar, value);
-            _macd.Calculate(pbar, value);
             _bb.Calculate(pbar, value);
             _rsi.Calculate(pbar, value);
 
             var ao = ((ValueDataSeries)_ao.DataSeries[0])[pbar];
             var kama9 = ((ValueDataSeries)_kama9.DataSeries[0])[pbar];
             var kama21 = ((ValueDataSeries)_kama9.DataSeries[0])[pbar];
-            var m1 = ((ValueDataSeries)_macd.DataSeries[0])[pbar];
-            var m2 = ((ValueDataSeries)_macd.DataSeries[1])[pbar];
-            var m3 = ((ValueDataSeries)_macd.DataSeries[2])[pbar];
             var fast = ((ValueDataSeries)fastEma.DataSeries[0])[pbar];
             var fastM = ((ValueDataSeries)fastEma.DataSeries[0])[pbar - 1];
             var slow = ((ValueDataSeries)slowEma.DataSeries[0])[pbar];
@@ -306,8 +309,6 @@
             var rsi1 = ((ValueDataSeries)_rsi.DataSeries[0])[pbar - 1];
             var rsi2 = ((ValueDataSeries)_rsi.DataSeries[0])[pbar - 2];
 
-            var macdUp = (m1 > m2);
-            var macdDown = (m1 < m2);
             var psarBuy = (psar < candle.Close);
             var psarSell = (psar > candle.Close);
 
@@ -336,16 +337,25 @@
                     _lastBarCounted = true;
             }
 
+            // LINDA MACD
+            var macd = _short.Calculate(bar, value) - _long.Calculate(bar, value);
+            var signal = _signal.Calculate(bar, macd);
+            var linda = macd - signal;
+
             var waddah = Math.Min(Math.Abs(t1) + 70, 255);
-            if (canColor == 2) // (bWaddahCandles)
+            if (canColor == 2)
                 _paintBars[pbar] = t1 > 0 ? MColor.FromArgb(255, 0, (byte)waddah, 0) : MColor.FromArgb(255, (byte)waddah, 0, 0);
 
+            var filteredLindaMACD = Math.Min(Math.Abs(linda * iMACDSensitivity), 255);
+            if (canColor == 3)
+                _paintBars[pbar] = linda > 0 ? MColor.FromArgb(255, 0, (byte)filteredLindaMACD, 0) : MColor.FromArgb(255, (byte)filteredLindaMACD, 0, 0);
+
             var filteredSQ = Math.Min(Math.Abs(sq1 * 25), 255);
-            if (canColor == 3) // (bSqueezeCandles)
+            if (canColor == 4)
                 _paintBars[pbar] = sq1 > 0 ? MColor.FromArgb(255, 0, (byte)filteredSQ, 0) : MColor.FromArgb(255, (byte)filteredSQ, 0, 0);
 
             var filteredDelta = Math.Min(Math.Abs(candle.Delta), 255);
-            if (canColor == 4) // (bDeltaCandles)
+            if (canColor == 5)
                 _paintBars[pbar] = candle.Delta > 0 ? MColor.FromArgb(255, 0, (byte)filteredDelta, 0) : MColor.FromArgb(255, (byte)filteredDelta, 0, 0);
 
             // Nebula cloud
@@ -360,6 +370,83 @@
                     _dnCloud[pbar].Upper = _kama21[pbar];
                     _dnCloud[pbar].Lower = _kama9[pbar];
                 }
+
+            #region FANTAIL VMA
+
+            var VMA = candle.Close;
+            var VarMA = candle.Close;
+            var MA = candle.Close;
+            var STR = candle.High - candle.Low;
+            decimal sPDI = 0.0m;
+            decimal sMDI = 0.0m;
+            decimal ADX = 0.0m;
+            var ADXR = 0.0;
+
+            var Hi = candle.High;
+            var Hi1 = p1C.High;
+            var Lo = candle.Low;
+            var Lo1 = p1C.Low;
+            var Close1 = p1C.Close;
+
+            var Bulls1 = 0.5m * (Math.Abs(Hi - Hi1) + (Hi - Hi1));
+            var Bears1 = 0.5m * (Math.Abs(Lo1 - Lo) + (Lo1 - Lo));
+
+            var Bears = Bulls1 > Bears1 ? 0 : (Bulls1 == Bears1 ? 0 : Bears1);
+            var Bulls = Bulls1 < Bears1 ? 0 : (Bulls1 == Bears1 ? 0 : Bulls1);
+
+            if (bar > 0)
+            {
+                sPDI = (10.0m * prevsPDI + Bulls) / (10.0m + 1);
+                sMDI = (10.0m * prevsMDI + Bears) / (10.0m + 1);
+            }
+
+            var TR = Math.Max(Hi - Lo, Hi - Close1);
+            if (bar > 0)
+                STR = (10.0m * prevSTR + TR) / (10.0m + 1);
+
+            var PDI = STR > 0 ? sPDI / STR : 0;
+            var MDI = STR > 0 ? sMDI / STR : 0;
+            var DX = (PDI + MDI) > 0 ? Math.Abs(PDI - MDI) / (PDI + MDI) : 0;
+            if (bar > 0)
+                ADX = (10.0m * prevADX + DX) / (10.0m + 1);
+            var vADX = ADX;
+
+            var adxlow = pprevADX < prevADX ? pprevADX : prevADX;
+            var adxmax = pprevADX > prevADX ? pprevADX : prevADX;
+            var ADXmin = Math.Min(1000000.0m, adxlow);
+            var ADXmax = Math.Max(-1.0m, adxmax);
+            var Diff = ADXmax - ADXmin;
+            var Const = Diff > 0 ? (vADX - ADXmin) / Diff : 0;
+            if (bar > 0)
+                VarMA = ((2 - Const) * p1C.Close + Const * candle.Close) / 2;
+
+            sma.Calculate(bar, VarMA);
+            var FanVMA = ((ValueDataSeries)sma.DataSeries[0])[bar];
+            //_fanVMA[bar] = FanVMA;
+
+            prevVarMA = VarMA;
+            pprevADX = prevADX;
+            prevADX = ADX;
+            prevSTR = STR;
+            prevsMDI = sMDI;
+            prevsPDI = sPDI;
+
+            #endregion
+
+//            double md = this.GetPrice(this.SourcePrice);
+//            double value = this.ema.GetValue(1);
+//            md = value + (md - value) / (this.TrackingFactor * Math.Pow(md / value, 4));
+
+            decimal md = candle.Close;
+            McGinleyDynamic.Calculate(pbar, value);
+            var val = ((ValueDataSeries)McGinleyDynamic.DataSeries[0])[pbar-1];
+            decimal mdDivVal = (md / val);
+            decimal mdMinusValPlusVal = val + (md - val);
+            double mdMinusValPlusVal1 = Convert.ToDouble(mdMinusValPlusVal);
+            double eat = mdMinusValPlusVal1 / (2 * Math.Pow((double)mdDivVal, 4));
+
+            _fanVMA[bar] = (decimal)eat;
+
         }
 
     }
